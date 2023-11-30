@@ -1,0 +1,289 @@
+	## Задание: уменьшить корневой раздел XFS на LVM
+
+	## Описание процесса
+	## Создаем временный раздел XFS на новом томе LVM.
+	## Переносим корневой раздел на временный том и загружаемся с него.
+	## Уменьшаем исходный том до нужного размера, возвращаем на него данные.
+	## Загружаемся с нового раздела. Удаляем временный том.
+	
+	## версия linux
+#cat /etc/*release
+CentOS Linux release 7.9.2009 (Core)
+...
+	## блочные устройства
+# lsblk
+NAME            MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+sda               8:0    0   16G  0 disk 
+├─sda1            8:1    0    1G  0 part /boot
+└─sda2            8:2    0   15G  0 part 
+  ├─centos-root 253:0    0 13.4G  0 lvm  /
+  └─centos-swap 253:1    0  1.6G  0 lvm  [SWAP]
+sdb               8:16   0   10G  0 disk 
+sdc               8:32   0    2G  0 disk 
+sdd               8:48   0    1G  0 disk 
+sde               8:64   0    1G  0 disk 
+
+	## устанавливаем необходимую утилиту xfsdump
+# yum install -y xfsdump
+...
+Installed:
+  xfsdump.x86_64 0:3.1.7-3.el7_9                                                                                      
+Dependency Installed:
+  attr.x86_64 0:2.4.46-13.el7                                                                                         
+Complete!
+		## Создаем временный раздел XFS на новом томе LVM
+
+	## создать физический том LVM на диске /dev/sdb
+# pvcreate /dev/sdb
+  Physical volume "/dev/sdb" successfully created.
+
+	## создать группу физических томов vg_root
+# vgcreate vg_root /dev/sdb
+  Volume group "vg_root" successfully created
+
+	## создать логический том lv_root на группе vg_root
+# lvcreate -n lv_root -l +100%FREE /dev/vg_root
+  Logical volume "lv_root" created.
+
+	## Создадим файловую систему XFS и смонтируем ее в каталог /mnt
+# mkfs.xfs /dev/vg_root/lv_root
+meta-data=/dev/vg_root/lv_root   isize=512    agcount=4, agsize=655104 blks
+...
+# mount /dev/vg_root/lv_root /mnt
+	## Смотрим файловые системы
+# df -hT
+Filesystem                  Type      Size  Used Avail Use% Mounted on
+devtmpfs                    devtmpfs  908M     0  908M   0% /dev
+tmpfs                       tmpfs     920M     0  920M   0% /dev/shm
+tmpfs                       tmpfs     920M  9.0M  911M   1% /run
+tmpfs                       tmpfs     920M     0  920M   0% /sys/fs/cgroup
+/dev/mapper/centos-root     xfs        14G  1.5G   12G  12% /
+/dev/sda1                   xfs      1014M  151M  864M  15% /boot
+tmpfs                       tmpfs     184M     0  184M   0% /run/user/0
+/dev/mapper/vg_root-lv_root xfs        10G   33M   10G   1% /mnt
+
+		## Переносим корневой раздел на временный том и загружаемся с него.
+
+	## Сдампим содержимое текущего корневого раздела в наш временный
+# xfsdump -J - /dev/mapper/centos-root | xfsrestore -J - /mnt
+...
+xfsdump: Dump Status: SUCCESS
+xfsrestore: Restore Status: SUCCESS
+	## Заходим в окружение chroot нашего временного корня
+# for i in /proc/ /sys/ /dev/ /run/ /boot/; do mount --bind $i /mnt/$i; done
+# chroot /mnt/
+	## Запишем новый загрузчик
+# grub2-mkconfig -o /boot/grub2/grub.cfg
+Generating grub configuration file ...
+Found linux image: /boot/vmlinuz-3.10.0-1160.el7.x86_64
+Found initrd image: /boot/initramfs-3.10.0-1160.el7.x86_64.img
+Found linux image: /boot/vmlinuz-0-rescue-a4e2fe8b3ea0451393632a20d7d3944c
+Found initrd image: /boot/initramfs-0-rescue-a4e2fe8b3ea0451393632a20d7d3944c.img
+done
+	## Обновляем образы загрузки
+# cd /boot ; for i in `ls initramfs-*img`; do dracut -v $i `echo $i|sed "s/initramfs-//g; s/.img//g"` --force; done
+*** Creating image file ***
+*** Creating microcode section ***
+*** Created microcode section ***
+*** Creating image file done ***
+*** Creating initramfs image file '/boot/initramfs-3.10.0-1160.el7.x86_64kdump.img' done ***
+	## Открываем конфигурационный файл grub:
+#vi /boot/grub2/grub.cfg
+	## меняем rd.lvm.lv=centos/root на vg_root/lv_root
+	## перезагрузка
+	## смотим корневой раздел
+lsblk
+NAME              MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+sda                 8:0    0   16G  0 disk
+├─sda1              8:1    0    1G  0 part /boot
+└─sda2              8:2    0   15G  0 part
+  ├─centos-swap   253:1    0  1.6G  0 lvm  [SWAP]
+  └─centos-root   253:2    0 13.4G  0 lvm
+sdb                 8:16   0   10G  0 disk
+└─vg_root-lv_root 253:0    0   10G  0 lvm  /
+sdc                 8:32   0    2G  0 disk
+sdd                 8:48   0    1G  0 disk
+sde                 8:64   0    1G  0 disk
+
+		## Уменьшаем исходный том до нужного размера, возвращаем на него данные.
+
+	## Удаляем его логический том root
+# lvremove /dev/mapper/centos-root
+Do you really want to remove active logical volume centos/root? [y/n]: y
+  Logical volume "root" successfully removed
+	## проверяем
+#lsblk
+NAME              MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+sda                 8:0    0   16G  0 disk
+├─sda1              8:1    0    1G  0 part /boot
+└─sda2              8:2    0   15G  0 part
+  └─centos-swap   253:1    0  1.6G  0 lvm  [SWAP]
+sdb                 8:16   0   10G  0 disk
+└─vg_root-lv_root 253:0    0   10G  0 lvm  /
+sdc                 8:32   0    2G  0 disk
+sdd                 8:48   0    1G  0 disk
+sde                 8:64   0    1G  0 disk
+
+vgs
+  VG      #PV #LV #SN Attr   VSize   VFree
+  centos    1   1   0 wz--n- <15.00g 13.39g
+  vg_root   1   1   0 wz--n- <10.00g     0
+	## Создаем новый логический том root меньшего размера
+lvcreate -n root -L 8G /dev/mapper/centos
+  Logical volume "root" created.
+  
+# lsblk
+NAME              MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+sda                 8:0    0   16G  0 disk
+├─sda1              8:1    0    1G  0 part /boot
+└─sda2              8:2    0   15G  0 part
+  ├─centos-swap   253:1    0  1.6G  0 lvm  [SWAP]
+  └─centos-root   253:2    0    8G  0 lvm
+sdb                 8:16   0   10G  0 disk
+└─vg_root-lv_root 253:0    0   10G  0 lvm
+sdc                 8:32   0    2G  0 disk
+sdd                 8:48   0    1G  0 disk
+sde                 8:64   0    1G  0 disk
+
+	## Создаем на нем файловую систему и монтируем его
+# mkfs.xfs /dev/mapper/centos-root
+meta-data=/dev/mapper/centos-root isize=512    agcount=4, agsize=524288 blks
+...
+# mount /dev/mapper/centos-root /mnt
+
+	## Возвращаем обратно содержимое корня
+# xfsdump -J - /dev/vg_root/lv_root | xfsrestore -J - /mnt
+...
+xfsdump: Dump Status: SUCCESS
+xfsrestore: Restore Status: SUCCESS
+
+	## Заходим в окружение chroot нашего временного корня
+# for i in /proc/ /sys/ /dev/ /run/ /boot/; do mount --bind $i /mnt/$i; done
+# chroot /mnt/
+
+	## Запишем новый загрузчик
+# grub2-mkconfig -o /boot/grub2/grub.cfg
+Generating grub configuration file ...
+File descriptor 7 (pipe:[23439]) leaked on vgs invocation. Parent PID 1959: /usr/sbin/grub2-probe
+File descriptor 7 (pipe:[23439]) leaked on vgs invocation. Parent PID 1959: /usr/sbin/grub2-probe
+Found linux image: /boot/vmlinuz-3.10.0-1160.el7.x86_64
+Found initrd image: /boot/initramfs-3.10.0-1160.el7.x86_64.img
+Found linux image: /boot/vmlinuz-0-rescue-a4e2fe8b3ea0451393632a20d7d3944c
+Found initrd image: /boot/initramfs-0-rescue-a4e2fe8b3ea0451393632a20d7d3944c.img
+File descriptor 7 (pipe:[23439]) leaked on vgs invocation. Parent PID 2175: /usr/sbin/grub2-probe
+File descriptor 7 (pipe:[23439]) leaked on vgs invocation. Parent PID 2175: /usr/sbin/grub2-probe
+done
+	## Обновляем образы загрузки
+# cd /boot ; for i in `ls initramfs-*img`; do dracut -v $i `echo $i|sed "s/initramfs-//g; s/.img//g"` --force; done
+...
+*** Creating image file ***
+*** Creating microcode section ***
+*** Created microcode section ***
+*** Creating image file done ***
+*** Creating initramfs image file '/boot/initramfs-3.10.0-1160.el7.x86_64kdump.img' done ***
+
+	## Открываем конфигурационный файл grub:
+vi /boot/grub2/grub.cfg
+	## меняем vg_root/lv_root на rd.lvm.lv=centos/root
+	# не перегружаеммся и не выходим из под chroot, переносим /var
+	# выделяем том под /var в зеркало
+	№ на свободных дисках создаем зеркало
+#pvcreate /dev/sdc /dev/sdd
+Physical volume "/dev/sdc" successfully created.
+Physical volume "/dev/sdd" successfully created.
+
+# vgcreate vg_var /dev/sdc /dev/sdd
+Volume group "vg_var" successfully created
+
+# lvcreate -L 950M -m1 -n lv_var vg_var
+Rounding up size to full physical extent 952.00 MiB
+Logical volume "lv_var" created.
+
+	# создаем ФС и перемещаем туда /var
+# mkfs.ext4 /dev/vg_var/lv_var
+Writing superblocks and filesystem accounting information: done
+# mount /dev/vg_var/lv_var /mnt
+# cp -aR /var/* /mnt/ # rsync -avHPSAX /var/ /mnt/
+	# сохраняем старый var
+#mkdir /tmp/oldvar && mv /var/* /tmp/oldvar
+	# монтируем новый var в каталог /var
+# umount /mnt
+# mount /dev/vg_var/lv_var /var
+	# изменяем fstab для автоматического копирования /var
+# echo "`blkid | grep var: | awk '{print $2}'` /var ext4 defaults 0 0" >> /etc/fstab
+
+		## Загружаемся с нового раздела. Удаляем временный том.
+
+# lvremove /dev/vg_root/lv_root
+Do you really want to remove active logical volume vg_root/lv_root? [y/n]: y
+  Logical volume "lv_root" successfully removed
+# vgremove /dev/vg_root
+  Volume group "vg_root" successfully removed
+# pvremove /dev/sdb
+  Labels on physical volume "/dev/sdb" successfully wiped.
+
+# vgs
+  VG     #PV #LV #SN Attr   VSize   VFree
+  centos   1   2   0 wz--n- <15.00g 5.39g
+  vg_var   2   1   0 wz--n-   2.99g 1.12g
+
+		## Выделяем том под  /home
+# lvcreate -n lv_home -L 2G /dev/mapper/centos
+  Logical volume "lv_home" created.
+
+# mkfs.xfs /dev/mapper/centos-lv_home
+meta-data=/dev/mapper/centos-lv_home isize=512    agcount=4, agsize=131072 blks
+...
+# mount /dev/mapper/centos-lv_home /home
+
+	# изменяем fstab для автоматического копирования /home
+# echo "`blkid | grep home | awk '{print $2}'` /home xfs defaults 0 0" >> /etc/fstab
+		## /home делаем том для снэпшотов
+	## генерируем файлы в /home
+# touch /home/file{1..20}
+# ls /home
+file1   file11  file13  file15  file17  file19  file20  file4  file6  file8
+file10  file12  file14  file16  file18  file2   file3   file5  file7  file9
+
+	## снимаем снэпшот
+# lvcreate -L 100MB -s -n home_snap /dev/mapper/centos-lv_home
+  Logical volume "home_snap" created.
+
+# lsblk
+NAME                     MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+sda                        8:0    0   16G  0 disk
+├─sda1                     8:1    0    1G  0 part /boot
+└─sda2                     8:2    0   15G  0 part
+  ├─centos-root          253:0    0    8G  0 lvm  /
+  ├─centos-swap          253:1    0  1.6G  0 lvm  [SWAP]
+  ├─centos-lv_home-real  253:8    0    2G  0 lvm
+  │ ├─centos-lv_home     253:7    0    2G  0 lvm  /home
+  │ └─centos-home_snap   253:10   0    2G  0 lvm
+  └─centos-home_snap-cow 253:9    0  100M  0 lvm
+    └─centos-home_snap   253:10   0    2G  0 lvm
+sdb                        8:16   0   10G  0 disk
+sdc                        8:32   0    2G  0 disk
+├─vg_var-lv_var_rmeta_0  253:2    0    4M  0 lvm
+│ └─vg_var-lv_var        253:6    0  952M  0 lvm  /var
+└─vg_var-lv_var_rimage_0 253:3    0  952M  0 lvm
+  └─vg_var-lv_var        253:6    0  952M  0 lvm  /var
+sdd                        8:48   0    1G  0 disk
+├─vg_var-lv_var_rmeta_1  253:4    0    4M  0 lvm
+│ └─vg_var-lv_var        253:6    0  952M  0 lvm  /var
+└─vg_var-lv_var_rimage_1 253:5    0  952M  0 lvm
+  └─vg_var-lv_var        253:6    0  952M  0 lvm  /var
+sde                        8:64   0    1G  0 disk
+
+	## удаляем часть файлов
+# rm -f /home/file{11..20}
+
+	## восстанавливаем из снэпшота
+# umount /home
+# lvconvert --merge /dev/mapper/centos-home_snap
+  Merging of volume centos/home_snap started.
+  centos/lv_home: Merged: 100.00%
+# mount /home
+
+# ls /home
+file1   file11  file13  file15  file17  file19  file20  file4  file6  file8
+file10  file12  file14  file16  file18  file2   file3   file5  file7  file9
